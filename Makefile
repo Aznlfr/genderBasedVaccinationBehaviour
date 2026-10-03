@@ -20,8 +20,8 @@ Sources += $(wildcard *.tex *.bib)
 
 ######################################################################
 
-Sources += $(wildcard Codes/*.R)
-Sources += $(wildcard Codes/*.py)
+Sources += $(wildcard codes/*.R)
+Sources += $(wildcard codes/*.py)
 autopipeR = defined
 
 slowtarget/synthetic_code_python.out: codes/synthetic_estimation.py
