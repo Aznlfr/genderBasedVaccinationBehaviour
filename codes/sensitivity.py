@@ -16,8 +16,29 @@ dirname = os.path.dirname(__file__)
 mainPath = os.path.join(dirname, 'USA/')
 dataPath = 'Data/'
 resultPath = 'Result/'
+#mainPath = "~/"
 script_name = os.path.basename(__file__)
 inp = sys.argv
+fit_sigma = inp[2] == 'T' if len(inp) > 2 else True
+separate_cv = inp[3] == 'T' if len(inp) > 3 else True
+separate_cvbar = inp[4] == 'T' if len(inp) > 4 else True
+separate_alpha = inp[5] == 'T' if len(inp) > 5 else True
+iter_interval = int(inp[1]) # Number of iteration
+max_ci = inp[6] == 'T' if len(inp) > 6 else True
+ntrain = int(inp[7]) if len(inp) > 7 else 0
+assor=float(inp[8]) if len(inp) > 8 else 0.0
+refusal=float(inp[9]) if len(inp) > 9 else 0.0
+side = float(inp[10]) if len(inp) > 10 else 0.0
+result_name = (f"{Path(script_name).stem}_sigma{'T' if fit_sigma else 'F'}"
+               f"_cv{'T' if separate_cv else 'F'}"
+               f"_cvbar{'T' if separate_cvbar else 'F'}"
+               f"_alpha{'T' if separate_alpha else 'F'}"
+               f"_smallci{'T' if max_ci else 'F'}"
+               f"_train{'T' if ntrain>0 else 'F'}"
+               f"_assortivity{assor}"
+               f"_refusal{refusal}"
+               f"_side{side}"
+)
 
 epd_file = mainPath + dataPath + 'EpiVacFile_6_week_added.csv'
 Fit_pow = mainPath + dataPath + 'fit_best_side_effect.csv'
@@ -40,11 +61,26 @@ method0 = 'LSODA'
 StateName = ['AK', 'AL', 'AR', 'AZ', 'CA', 'CO', 'CT', 'DC', 'DE', 'FL', 'GA', 'HI', 'IA', 'ID', 'IL', 'IN', 'KS',
              'KY', 'LA', 'MA', 'MD', 'ME', 'MI', 'MN', 'MO', 'MS', 'MT', 'NC', 'ND', 'NE', 'NH', 'NJ', 'NM', 'NV', 'NY',
              'OH', 'OK', 'OR', 'PA',  'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VA', 'VT', 'WA', 'WI', 'WV', 'WY']
-iter_interval = int(inp[1]) # Number of iteration
-ntrain = 8
+
+def unpack_parameters(parameters):
+    values = iter(parameters)
+    alpha_1 = next(values)
+    alpha_2 = next(values) if separate_alpha else alpha_1
+    cv_m = next(values)
+    cv_w = next(values) if separate_cv else cv_m
+    cvbar_m = next(values)
+    cvbar_w = next(values) if separate_cvbar else cvbar_m
+    tilde_c_i = next(values)
+    rate1 = next(values)
+    sigma = next(values) if fit_sigma else 1.0
+    return alpha_1, alpha_2, cv_m, cv_w, cvbar_m, cvbar_w, tilde_c_i, rate1, sigma
+
+
 def system_dynamics(x, y, alpha_m, alpha_w, cv_m0, cv_w0, cbar_m, cbar_w, c_i, k1, sigma, *arg_N):
-    leng = 9
-    lenn, N12, fr_Ne_m, fr_Ne_w,  cvcof_m, cvcof_w, fun_mn, fun_wm, Ntot = arg_N[0:leng]
+    leng = 11
+    lenn, N12, h_m, h_w, Nm, Nw,  cvcof_m, cvcof_w, fun_mn, fun_wm, Ntot = arg_N[0:leng]
+    cvcof_m = cvcof_m*( 1.0 + side)
+    cvcof_w = cvcof_w*(1.0 + side)
     time_ref = arg_N[leng:leng + lenn]
     number_of_case = arg_N[leng + lenn: leng + 2 * lenn]
     number_of_death = arg_N[leng + 2 * lenn: leng + 3 * lenn]
@@ -55,6 +91,10 @@ def system_dynamics(x, y, alpha_m, alpha_w, cv_m0, cv_w0, cbar_m, cbar_w, c_i, k
     "extrapolate")
     frac_avail_dose_interpolated1 = interpolate.interp1d(time_ref, frac_avail_dose, kind='zero', axis=0, fill_value=
     "extrapolate")
+    progress = (x - time_ref[0])/(time_ref[-1] - time_ref[0])
+    scale = 1.0 + refusal*(1.0 - 2.0*progress)
+    fr_Ne_m = (1.0 -h_m*scale)*Nm/N12
+    fr_Ne_w = (1.0 - h_w*scale)*Nw/N12
     im_vax_m, br_vax_m, im_vax_w, br_vax_w = y
     totalvax_m = im_vax_m + br_vax_m  # proportion of men vaccinated to whole Nf12
     totalvax_w = im_vax_w + br_vax_w  # proportion of women vaccinated to whole Nf12
@@ -84,16 +124,21 @@ def system_dynamics(x, y, alpha_m, alpha_w, cv_m0, cv_w0, cbar_m, cbar_w, c_i, k
     intermediate_w = (1 - alpha_w) * fr_Ne_w - im_vax_w
     intermediate_br_m = alpha_m * fr_Ne_m - br_vax_m
     intermediate_br_w = alpha_w * fr_Ne_w - br_vax_w
-
+    m2m = max_mv_mu*totalvax_m*(N12)/Nm
+    w2w = max_wv_wu*totalvax_w*N12/Nw
+    imitation_m = (totalvax_m * max_mv_mu + totalvax_w * max_wv_mu)*(1.0 - assor) + assor*m2m
+    imitation_w = (totalvax_m * max_mv_wu + totalvax_w * max_wv_wu)*(1.0 - assor) + assor*w2w
     # Calculate num_im_reg_m, num_im_reg_w, num_br_reg_m, and num_br_reg_w using the conditions
     conditions = {
-        'num_im_reg_m': intermediate_m * sigma* (totalvax_m * max_mv_mu + totalvax_w * max_wv_mu) if
+        'num_im_reg_m': intermediate_m * sigma*imitation_m if
                                                                                 intermediate_m > 0 else 0.0,
-        'num_im_reg_w': intermediate_w * sigma* (totalvax_m * max_mv_wu + totalvax_w * max_wv_wu) if
+        'num_im_reg_w': intermediate_w * sigma*imitation_w if
                                                                                 intermediate_w > 0 else 0.0,
         'num_br_reg_m': intermediate_br_m if mv_mu > 0.0 and intermediate_br_m > 0 else 0.0,
         'num_br_reg_w': intermediate_br_w if wv_wu > 0.0 and intermediate_br_w > 0 else 0.0
     }
+
+    # Calculate total_reg
 
     # Calculate total_reg
     total_reg = sum(conditions.values())
@@ -112,20 +157,20 @@ def system_dynamics(x, y, alpha_m, alpha_w, cv_m0, cv_w0, cbar_m, cbar_w, c_i, k
 
 def OBJ_ODE(parameters, *arg):
 
-    lnght = 9
-    ssize, Nf12, NonHesitant_m, NonHesitant_w, cv_cof_m, cv_cof_w, fun_m, fun_w, totalN = arg[0:lnght]
+    lnght = 11
+    ssize, Nf12, Hesitant_m, Hesitant_w, Nsex_m, Nsex_w, cv_cof_m, cv_cof_w, fun_m, fun_w, totalN = arg[0:lnght]
     time_ref = arg[lnght:lnght + ssize]
     new_vaccinated_00 = arg[lnght + ssize:lnght + 2 * ssize]
     new_vaccinated_01 = arg[lnght + 2 * ssize:lnght + 3 * ssize]
     Number_of_Case = arg[lnght + 3 * ssize:lnght + 4 * ssize]
     Number_of_Death = arg[lnght + 4 * ssize:lnght + 5 * ssize]
     Fraction_of_Eligible = arg[lnght + 5 * ssize:lnght + 6 * ssize]
-    alpha, cv1_m, cv1_w,  cv_barm, cv_barw,  tilde_c_i_1,  k1, sgm = parameters
-    arg_N = [len(time_ref), Nf12, NonHesitant_m / Nf12, NonHesitant_w / Nf12, cv_cof_m, cv_cof_w, fun_m, fun_w, totalN]
+    alpha_1, alpha_2, cv1_m, cv1_w, cv_barm, cv_barw, tilde_c_i_1, k1, sigma = unpack_parameters(parameters)
+    arg_N = [len(time_ref), Nf12, Hesitant_m, Hesitant_w, Nsex_m, Nsex_w, cv_cof_m, cv_cof_w, fun_m, fun_w, totalN]
 
     sol = integrate.solve_ivp(system_dynamics, [time_ref[0], time_ref[-1]], (
-                            0, 0, 0, 0), args=(alpha, alpha, cv1_m, cv1_w, cv_barm, cv_barw,  tilde_c_i_1,
-                                                                             k1, sgm, *arg_N, *time_ref,
+                            0, 0, 0, 0),  max_step = 0.1, atol=1e-9, rtol=1e-7, args=(alpha_1, alpha_2, cv1_m, cv1_w, cv_barm, cv_barw, tilde_c_i_1,
+                                                                             k1, sigma, *arg_N, *time_ref,
                                                                              *Number_of_Case, *Number_of_Death,
                                                                              *Fraction_of_Eligible),
                           t_eval=time_ref, dense_output=True, method=method0)
@@ -166,66 +211,96 @@ def optm(arg): #
     cof_side_effect_w = fitPow.loc[(fitPow['Location'] == i) & (fitPow['sex'] == 2), 'parameter'].iloc[0]
     fun_side_effect_m = fitPow.loc[(fitPow['Location'] == i) & (fitPow['sex'] == 1), 'minerror'].iloc[0]
     fun_side_effect_w = fitPow.loc[(fitPow['Location'] == i) & (fitPow['sex'] == 2), 'minerror'].iloc[0]
-    NonHesitant_m = Nsex_m*(1-hesitancy.loc[(hesitancy['Location'] == i) & (hesitancy['sex'] == 1),  'avg_proportion_strongly_not'].iloc[0])
-    NonHesitant_w = Nsex_w*(1-hesitancy.loc[(hesitancy['Location'] == i) & (hesitancy['sex'] == 2), 'avg_proportion_strongly_not'].iloc[0])
+    #NonHesitant_m = Nsex_m*(1-hesitancy.loc[(hesitancy['Location'] == i) & (hesitancy['sex'] == 1),  'avg_proportion_strongly_not'].iloc[0])
+    #NonHesitant_w = Nsex_w*(1-hesitancy.loc[(hesitancy['Location'] == i) & (hesitancy['sex'] == 2), 'avg_proportion_strongly_not'].iloc[0])
+    Hesitant_m = (hesitancy.loc[(hesitancy['Location'] == i) & (hesitancy['sex'] == 1),  'avg_proportion_strongly_not'].iloc[0])
+    Hesitant_w = (hesitancy.loc[(hesitancy['Location'] == i) & (hesitancy['sex'] == 2), 'avg_proportion_strongly_not'].iloc[0])
     fraction_dose_available = np.clip(dose_available / N, 0, None)
     death_case_fraction = Number_of_Death/Number_of_Case
-    min_death_case =  min(death_case_fraction[death_case_fraction!=0])
+    min_death_case =  min(death_case_fraction[(death_case_fraction>0) & (np.isfinite(death_case_fraction))])
     Ref_Time_2 = list(OWID.loc[OWID['Location'] == i, 'Date'])
     for k in Ref_Time_2:
         delta = k - Ref_Time_2[0]
         Ref_Time.append(delta.days)
     Time_Ref = np.array(Ref_Time, dtype=np.float64)
     Time_Ref = np.divide(Time_Ref, 7.0)
-    cutted_Time_Ref = Time_Ref[:-ntrain]
-    cutted_new_vaccinated_0 = new_vaccinated_0[:-ntrain]
-    cutted_new_vaccinated_1= new_vaccinated_1[:-ntrain]
-    cutted_Number_of_Case = Number_of_Case[:-ntrain]
-    cutted_Number_of_Death = Number_of_Death[:-ntrain]
-    cutted_fraction_dose_available = fraction_dose_available[:-ntrain]
+    if ntrain >0:
+       cutted_Time_Ref = Time_Ref[:-ntrain]
+       cutted_new_vaccinated_0 = new_vaccinated_0[:-ntrain]
+       cutted_new_vaccinated_1= new_vaccinated_1[:-ntrain]
+       cutted_Number_of_Case = Number_of_Case[:-ntrain]
+       cutted_Number_of_Death = Number_of_Death[:-ntrain]
+       cutted_fraction_dose_available = fraction_dose_available[:-ntrain]
+    else:
+       cutted_Time_Ref = Time_Ref[:]
+       cutted_new_vaccinated_0 = new_vaccinated_0[:]
+       cutted_new_vaccinated_1= new_vaccinated_1[:]
+       cutted_Number_of_Case = Number_of_Case[:]
+       cutted_Number_of_Death = Number_of_Death[:]
+       cutted_fraction_dose_available = fraction_dose_available[:]
 
 ################ TRY ############## alpha_1, alpha_2, cv1_m, cv1_w,  cv_bar01,  tilde_c_i_1,  k1
     max_rate = 10
     max_cbar0 = 1
+    max_tilde = min_death_case if max_ci else 1.0
     np.random.seed(seed_number)
     cv_mg = random.random()
-    cv_wg = random.random()
-    cv_bar0_g = max_cbar0*random.random()
-    cv_bar1_g = max_cbar0 * random.random()
-    tilde_C_I_g = 0 + min_death_case * random.random()
+    cv_bar_g = max_cbar0*random.random()
+    tilde_C_I_g =  max_tilde* random.random()
     rate_g1 = 0 + max_rate * random.random()
-    sgm_g2 =  random.random()
-    alpha_g = 0 + random.random()
-#    alpha_w_g = 0 + random.random()
-    int_guess = np.array([alpha_g, cv_mg, cv_wg, cv_bar0_g, cv_bar1_g,  tilde_C_I_g,  rate_g1, sgm_g2])
-    limit_list = [(0, 1), (0, 1), (0, 1), (0, max_cbar0), (0, max_cbar0), (0, min_death_case), (0, max_rate),
-                  (0, 1)]
+    cv_wg =  random.random()
+    alpha_m_g = 0 + random.random()
+    alpha_w_g = 0 + random.random()
+    int_guess = [alpha_m_g]
+    limit_list = [(0, 1)]
+    if separate_alpha:
+        int_guess.append(alpha_w_g)
+        limit_list.append((0, 1))
+    int_guess.append(cv_mg)
+    limit_list.append((0, 1))
+    if separate_cv:
+        int_guess.append(cv_wg)
+        limit_list.append((0, 1))
+    int_guess.append(cv_bar_g)
+    limit_list.append((0, max_cbar0))
+    if separate_cvbar:
+        int_guess.append(max_cbar0 * random.random())
+        limit_list.append((0, max_cbar0))
+    int_guess.extend([tilde_C_I_g, rate_g1])
+    limit_list.extend([(0.0, max_tilde), (0, max_rate)])
+    if fit_sigma:
+        int_guess.append(random.random())
+        limit_list.append((0, 1))
+    int_guess = np.array(int_guess)
     startTime = time.time()  #ssize, N, NonHesitant_m, NonHesitant_w, cv_cof, Ntota
     res_opt = optimize.differential_evolution(OBJ_ODE, bounds=limit_list, polish=False, x0=int_guess, maxiter=
     iter_interval,  seed=random.default_rng(seed=seed_number),
-                                              args=[len(cutted_Time_Ref), N, NonHesitant_m, NonHesitant_w, cof_side_effect_m,
+                                              args=[len(cutted_Time_Ref), N, Hesitant_m, Hesitant_w, Nsex_m, Nsex_w,cof_side_effect_m,
                                                     cof_side_effect_w, fun_side_effect_m, fun_side_effect_w,
                                                     Ntotal,  *cutted_Time_Ref, *cutted_new_vaccinated_0,
                                                                                       *cutted_new_vaccinated_1,
                                                               *cutted_Number_of_Case, *cutted_Number_of_Death,
                                                     *cutted_fraction_dose_available])
 # Extracting the estimated parameters ssize, Nf12, NonHesitant_m, NonHesitant_w, cv_cof_m, cv_cof_w, fun_m, fun_w, totalN
-    alpha, cv_1, cv_2,  cv_bar0, cv_bar1,  tilde_c_i,  rate1, sgm1 = res_opt.x
+    alpha_1, alpha_2, cv_m, cv_w, cvbar_m, cvbar_w, tilde_c_i, rate1, sigma = unpack_parameters(res_opt.x)
     RSE_1 = res_opt.fun
 
-    with open(mainPath + resultPath + str(script_name) + 'ntrain.txt', "a") as text_file:
-            print(f"{i}, alpha: {alpha}, cv_1: {cv_1}, cv_2: {cv_2}, cv_bar1: {cv_bar0}, "
-                  f"cv_bar2: {cv_bar1},tilde_c_i: {tilde_c_i}, sigma: {sgm1}"
+    with open(mainPath + resultPath + result_name + '.txt', "a") as text_file:
+            print(f"{i}, alpha_1: {alpha_1}, alpha_2: {alpha_2}, cv_m: {cv_m}, cv_w:{cv_w}, cvbar_m: {cvbar_m}, cvbar_w: {cvbar_w}, "
+                  f"tilde_c_i: {tilde_c_i}, sigma: {sigma}, "
                   f"k1: {rate1},"
-                  f" RSE: {RSE_1}, seed:{seed_number}, success: {res_opt.success}, msg: {res_opt.message}", file=text_file)
+                  f" RSE: {RSE_1}, seed:{seed_number}, msg: {res_opt.message}, success: {res_opt.success}", file=text_file)
 
-    return i, alpha, cv_1, cv_2,  cv_bar0, cv_bar1,  tilde_c_i,  rate1, sgm1,  RSE_1, seed_number
+    return i, alpha_1, alpha_2, cv_m, cv_w, cvbar_m, cvbar_w, tilde_c_i, rate1, sigma, RSE_1, seed_number
 
 
 def main():
-    result_dataframe = pd.DataFrame(columns=['code', 'alpha', 'cv_1', 'cv_2', 'cvbar1', 'cvbar2',
+    filepath = Path(mainPath + resultPath + result_name + '_estimated.csv')
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    result_dataframe = pd.DataFrame(columns=['code', 'alpha_1', 'alpha_2', 'cv_m', 'cv_w', 'cvbar_m', 'cvbar_w',
                                              'tilde_c_i', 'k1', 'sigma',  'RSE_1', 'seed'])
-    Number_of_cpus = multiprocessing.cpu_count()
+    #Number_of_cpus = multiprocessing.cpu_count()
+    Number_of_cpus = int(os.environ.get('SLURM_CPUS_PER_TASK', multiprocessing.cpu_count()))
     seed_pool = [2026]
     script_name = os.path.basename(__file__)
     for seed_run in seed_pool:
@@ -235,11 +310,9 @@ def main():
             run_pool.close()
             run_pool.join()
         f = parallel_output
-        ddf = pd.DataFrame(f, columns=['code', 'alpha', 'cv_1', 'cv_2',  'cvbar1', 'cvbar2', 'tilde_c_i',
+        ddf = pd.DataFrame(f, columns=['code', 'alpha_1', 'alpha_2', 'cv_m', 'cv_w', 'cvbar_m', 'cvbar_w' , 'tilde_c_i',
                                        'k1', 'sigma',  'RSE_1', 'seed'])
         result_dataframe = pd.concat([ddf, result_dataframe])
-    filepath = Path(mainPath + resultPath  + str(script_name) + str(ntrain) + 'ntrain_estimated.csv')
-    filepath.parent.mkdir(parents=True, exist_ok=True)
     result_dataframe.to_csv(filepath)
 
 
